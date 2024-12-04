@@ -65,14 +65,33 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     )
 
     # Various tiling dimensions (You may want to define more of them)
-    c_in_pmax = nl.tile_size.pmax
-    n_tiles_c_in = in_channels // c_in_pmax
 
+    # The P dimension size of a tile in both SBUF and PSUM must never 
+    # exceed nki.tile_size.pmax == 128.
+    c_in_pmax = nl.tile_size.pmax
+
+    # free dimension max
+    f_dim_max = nl.tile_size.psum_fmax
+
+    # number of tiles == number of input channels divided by max number of channels
+    # partition dimension for any given tile
+    n_tiles_c_in = in_channels // c_in_pmax
+    weight_matrix = nl.load(W)
     # Process the images in batches
     for b in nl.affine_range(batch_size):
-        # TODO: Perform the convolution of X[b] with the weights W and bias b, followed by a maxpool
-        # and store the result in X_out[b]
-        continue
+        image = nl.load(X[b])
+        intermediate_output = None
+        res_psum = nl.zeros((in_channels, out_height, out_width), nl.float32, buffer=nl.psum)
+
+        for filter_height_index in nl.affine_range(filter_height):
+            for filter_width_index in nl.affine_range(filter_width):
+                filter_weights = weight_matrix[: , :, filter_height_index, filter_width_index]
+                image_filtered = nl.copy(image[:, filter_height_index:input_height-filter_height+filter_height_index + 1, filter_width_index:input_width-filter_width+filter_width_index+1])
+                image_filtered = image_filtered.reshape((in_channels, out_height * out_width))
+                output = nl.matmul(filter_weights, image_filtered)
+                res_psum += output.reshape((in_channels, out_height, out_width))
+
+        nl.store(X_out[b], res_psum)
 
     return X_out
 
