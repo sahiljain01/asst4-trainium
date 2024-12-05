@@ -64,6 +64,8 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
         buffer=nl.hbm,
     )
 
+    print(f"\n X out shape: {X_out.shape} \n")
+
     # Various tiling dimensions (You may want to define more of them)
 
     # The P dimension size of a tile in both SBUF and PSUM must never 
@@ -142,7 +144,10 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                             )
                             res_psum += result
 
-                nl.store(X_out[b, n_tile_out_index, :, row, :], res_psum)
+                # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), row, :], res_psum)
+                output_image[:, row, :] = res_psum
+
+            nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], output_image)
 
 
     # - assign space in SBUF to store entire image, call it x
