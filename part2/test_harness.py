@@ -54,8 +54,7 @@ def test_correctness_conv2d_kernel(
     # output_channels_list = [128, 256]
     input_channels_list = [128]
     output_channels_list = [128]
-
-    kernel_size_list = [4]
+    kernel_size_list = [3]
     batch_size_list = [4]
     image_dims_list = [(32, 16)]
     pool_size = 2 if use_maxpool else 1
