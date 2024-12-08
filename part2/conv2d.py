@@ -83,18 +83,21 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
     # load in the weights into an SBUF array of shape 
     # (n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, 128, kernel_height, kernel_width)
-    weight_matrix_orig = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype=nl.float32, buffer=nl.sbuf)
-    weight_matrix = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax), dtype=nl.float32, buffer=nl.sbuf)
+    weight_matrix_orig = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
+    weight_matrix = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax), dtype=W.dtype, buffer=nl.sbuf)
+    
+    bias_sbuf = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), 1), dtype=W.dtype, buffer=nl.sbuf)
+    for bias_tile_out in nl.affine_range(n_tiles_c_out):
+        bias_sbuf[bias_tile_out, :, 0] = nl.load(bias[128 * bias_tile_out: 128 * (bias_tile_out + 1)])
 
     for n_tile_in in nl.affine_range(n_tiles_c_in):
         for n_tile_out in nl.affine_range(n_tiles_c_out):
             weight_no_transpose = nl.load(W[128 * n_tile_out: 128 * (n_tile_out + 1), 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
             weight_matrix_orig[n_tile_out, :, n_tile_in, :, :, :] = weight_no_transpose
 
-    x_sbuf = nl.ndarray((2, nl.par_dim(100), 100, 100), buffer=nl.sbuf, dtype=nl.float32) # specify P dimension to be the second dimension
+    x_sbuf = nl.ndarray((2, nl.par_dim(100), 100, 100), buffer=nl.sbuf, dtype=W.dtype) # specify P dimension to be the second dimension
 
     # move data around using nl.copy to get an array of shape 
-    # (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_out_pmax), c_in_pmax)
     for n_tile_in in nl.affine_range(n_tiles_c_in):
         for n_tile_out in nl.affine_range(n_tiles_c_out):
             for n_tile_in_channel in nl.affine_range(128):
@@ -106,31 +109,32 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                             )
 
     out_chunks = 2
-    n_chunks = (out_height + (out_chunks - 1)) / out_chunks
+    n_chunks = (out_height + (out_chunks - 1)) // out_chunks
+    in_rows = (out_chunks + filter_height - 1)
 
     # loop over batch
     for b in nl.affine_range(batch_size):
-        for n_chunk in n_chunks:
+        for n_chunk in nl.affine_range(n_chunks):
             image = nl.ndarray(
-                (n_tiles_c_in, nl.par_dim(c_in_pmax), input_height, input_width), 
-                dtype=nl.float32, 
+                (n_tiles_c_in, nl.par_dim(c_in_pmax), in_rows, input_width), 
+                dtype=W.dtype, 
                 buffer=nl.sbuf
             )
 
             for n_tile_in in nl.affine_range(n_tiles_c_in):
                 # load corresponding part of input image
-                image[n_tile_in, :, :, :] = nl.load(X[b, 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
+                image[n_tile_in, :, :, :] = nl.load(X[b, 128 * n_tile_in: 128 * (n_tile_in + 1), (n_chunk * out_chunks): (n_chunk * out_chunks) + in_rows, :])
 
             # # loop over n_tiles_c_out:
             for n_tile_out_index in nl.affine_range(n_tiles_c_out):
                 # assign space in SBUF to store output
                 output_image = nl.ndarray(
-                    (nl.par_dim(c_out_pmax), out_height, out_width), 
-                    dtype=nl.float32, 
+                    (nl.par_dim(c_out_pmax), out_chunks, out_width), 
+                    dtype=W.dtype,
                     buffer=nl.sbuf
                 )
                 # loop over output_rows:
-                for row in nl.affine_range(out_height):
+                for row in nl.affine_range(out_chunks):
                     # assign space in PSUM to store output row
                     res_psum = nl.zeros((c_in_pmax, out_width), nl.float32, buffer=nl.psum)
                     # loop over kernel_height
@@ -144,34 +148,11 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                                     weight_matrix[filter_height_index, filter_width_index, n_tile_out_index, n_tile_in_index, :, :],
                                     image[n_tile_in_index, :, row + filter_height_index, filter_width_index: filter_width_index + out_width]
                                 )
-                                # # res_psum[:, :] = nl.copy(nl.add(result, res_psum))
                                 res_psum += result
 
-                    # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), row, :], res_psum)
                     output_image[:, row, :] = res_psum
 
-                
-                # zeros_matrix = nl.zeros((nl.par_dim(c_out_pmax), out_height, out_width), nl.float32, buffer=nl.psum)
-                nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], output_image)
-                # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], zeros_matrix)
+                output_image = nisa.tensor_scalar(output_image, np.add, bias_sbuf[n_tile_out_index, :, 0])
+                nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), n_chunk * out_chunks: (n_chunk * out_chunks) + out_chunks, :], output_image)
 
     return X_out
-
-if __name__ == "__main__":
-    input_channels = 128
-    output_channels = 128
-    kernel_size = 3
-    batch_size = 4
-    image_dims = (32, 16)
-
-    X = np.random.rand(
-        batch_size, input_channels, image_dims[0], image_dims[1]
-    ).astype(np.float32)
-    W = np.random.rand(
-        output_channels, input_channels, kernel_size, kernel_size
-    ).astype(np.float32)
-    bias = (
-        np.zeros(output_channels).astype(np.float32)
-    )
-
-    fused_conv2d_maxpool(X, W, bias)
