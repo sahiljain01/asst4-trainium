@@ -101,121 +101,59 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 for n_tile_out_channel in nl.affine_range(128):
                     for k_h in nl.affine_range(filter_height):
                         for k_w in nl.affine_range(filter_width):
-                            # (n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, 128, kernel_height, kernel_width)
-                            # i_a, i_b, i_c, i_d, i_e, i_f = nl.mgrid[n_tile_out, n_tile_out_channel, n_tile_in, n_tile_in_channel, 0:filter_height, 0:filter_width]
-                            # i_a, i_b, i_c, i_d, i_e, i_f = nl.mgrid[0:1, 0:1, 0:1, 0:1, 0:filter_height, 0:filter_width]
-
-                            # i_a = i_a + n_tile_out
-                            # i_b = i_b + n_tile_out_channel
-                            # i_c = i_c + n_tile_in
-                            # i_d = i_d + n_tile_in_channel
-
-                            # i_g, i_l = nl.mgrid[ 0:filter_height, 0:filter_width]
-
-                            # p = nl.copy(
-                            #     weight_matrix_orig[0, 0, :, :, :, :]
-                            # )
                             weight_matrix[k_h, k_w, n_tile_out, n_tile_in, :, n_tile_in_channel] = nl.copy(
                                 weight_matrix_orig[n_tile_out, :, n_tile_in, n_tile_in_channel, k_h, k_w]
                             )
-                            # weight_matrix[i_g, i_l, n_tile_out, n_tile_in, n_tile_out_channel, n_tile_in_channel] = nl.copy(
-                            #     weight_matrix_orig[i_a, i_b, i_c, i_d, i_e, i_f]
-                            # )
-                            # p = nl.copy(
-                            #     weight_matrix_orig[i_a, i_b, i_c, i_d, i_e, i_f]
-                            # )
 
+    out_chunks = 2
+    n_chunks = (out_height + (out_chunks - 1)) / out_chunks
 
-    # transpose that to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax), call this w
-
-
-    # loop over batch:
+    # loop over batch
     for b in nl.affine_range(batch_size):
-        image = nl.ndarray(
-            (n_tiles_c_in, nl.par_dim(c_in_pmax), input_height, input_width), 
-            dtype=nl.float32, 
-            buffer=nl.sbuf
-        )
-
-        for n_tile_in in nl.affine_range(n_tiles_c_in):
-            # load corresponding part of input image
-            image[n_tile_in, :, :, :] = nl.load(X[b, 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
-
-        # # loop over n_tiles_c_out:
-        for n_tile_out_index in nl.affine_range(n_tiles_c_out):
-            # assign space in SBUF to store output
-            output_image = nl.ndarray(
-                (nl.par_dim(c_out_pmax), out_height, out_width), 
+        for n_chunk in n_chunks:
+            image = nl.ndarray(
+                (n_tiles_c_in, nl.par_dim(c_in_pmax), input_height, input_width), 
                 dtype=nl.float32, 
                 buffer=nl.sbuf
             )
-            # loop over output_rows:
-            for row in nl.affine_range(out_height):
-                # assign space in PSUM to store output row
-                res_psum = nl.zeros((c_in_pmax, out_width), nl.float32, buffer=nl.psum)
-                # loop over kernel_height
-                for filter_height_index in nl.affine_range(filter_height):
-                    # loop over kernel_width
-                    for filter_width_index in nl.affine_range(filter_width):
-                        # loop over n_tiles_c_in
-                        for n_tile_in_index in nl.affine_range(n_tiles_c_in):
-                            # (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax)
-                            
-                            result = nl.matmul(
-                                weight_matrix[filter_height_index, filter_width_index, n_tile_out_index, n_tile_in_index, :, :],
-                                image[n_tile_in_index, :, row + filter_height_index, filter_width_index: filter_width_index + out_width]
-                            )
-                            # # res_psum[:, :] = nl.copy(nl.add(result, res_psum))
-                            res_psum += result
 
-                # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), row, :], res_psum)
-                output_image[:, row, :] = res_psum
+            for n_tile_in in nl.affine_range(n_tiles_c_in):
+                # load corresponding part of input image
+                image[n_tile_in, :, :, :] = nl.load(X[b, 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
 
-            
-            # zeros_matrix = nl.zeros((nl.par_dim(c_out_pmax), out_height, out_width), nl.float32, buffer=nl.psum)
-            nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], output_image)
-            # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], zeros_matrix)
+            # # loop over n_tiles_c_out:
+            for n_tile_out_index in nl.affine_range(n_tiles_c_out):
+                # assign space in SBUF to store output
+                output_image = nl.ndarray(
+                    (nl.par_dim(c_out_pmax), out_height, out_width), 
+                    dtype=nl.float32, 
+                    buffer=nl.sbuf
+                )
+                # loop over output_rows:
+                for row in nl.affine_range(out_height):
+                    # assign space in PSUM to store output row
+                    res_psum = nl.zeros((c_in_pmax, out_width), nl.float32, buffer=nl.psum)
+                    # loop over kernel_height
+                    for filter_height_index in nl.affine_range(filter_height):
+                        # loop over kernel_width
+                        for filter_width_index in nl.affine_range(filter_width):
+                            # loop over n_tiles_c_in
+                            for n_tile_in_index in nl.affine_range(n_tiles_c_in):
+                                # (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax)
+                                result = nl.matmul(
+                                    weight_matrix[filter_height_index, filter_width_index, n_tile_out_index, n_tile_in_index, :, :],
+                                    image[n_tile_in_index, :, row + filter_height_index, filter_width_index: filter_width_index + out_width]
+                                )
+                                # # res_psum[:, :] = nl.copy(nl.add(result, res_psum))
+                                res_psum += result
 
-    # - assign space in SBUF to store entire image, call it x
-    # # shape : (n_tiles_c_in, nl.par_dim(c_in_pmax), image_height, image_width)
-    # loop over n_tiles_c_in:
-    #     - load corresponding part of input image
+                    # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), row, :], res_psum)
+                    output_image[:, row, :] = res_psum
 
-    # loop over n_tiles_c_out:
-    #     - assign space in SBUF to store output
-    #     # shape : (nl.par_dim(c_out_pmax), out_height, out_width)
-    #     loop over output_rows:
-    #         - assign space in PSUM to store output row
-    #         loop over kernel_height:
-    #             loop over kernel_width:
-    #                 loop over n_tiles_c_in:
-    #                     - matmul w[kernel_height, kernel_width, n_tile_c_out, n_tile_cin, :, :].T with
-    #                     x[n_tiles_c_in, :, out_row + kernel_height, kernel_width:kernel_width + out_width]
-    #         - copy stuff from PSUM back to SBUF
-    #     - copy stuff from SBUF back to HBM
-
-    # weight_matrix_pt2[i_p4, i_p5, i_p0, i_p2, i_p3, i_p1] = nl.copy(weight_matrix[i_p0, i_p1, i_p2, i_p3, i_p4, i_p5])    
-    # print(weight_matrix_pt2.shape)
-    # nl.device_print("Weight Matrix", weight_matrix_pt2[0,0,0,0,:, :])
-
-
-
-    # weight_matrix = nl.load(W)
-    # # Process the images in batches
-    # for b in nl.affine_range(batch_size):
-    #     image = nl.load(X[b])
-    #     intermediate_output = None
-    #     res_psum = nl.zeros((in_channels, out_height, out_width), nl.float32, buffer=nl.psum)
-
-        # for filter_height_index in nl.affine_range(filter_height):
-        #     for filter_width_index in nl.affine_range(filter_width):
-    #             filter_weights = weight_matrix[: , :, filter_height_index, filter_width_index]
-    #             image_filtered = nl.copy(image[:, filter_height_index:input_height-filter_height+filter_height_index + 1, filter_width_index:input_width-filter_width+filter_width_index+1])
-    #             image_filtered = image_filtered.reshape((in_channels, out_height * out_width))
-    #             output = nl.matmul(filter_weights, image_filtered)
-    #             res_psum += output.reshape((in_channels, out_height, out_width))
-
-    #     nl.store(X_out[b], res_psum)
+                
+                # zeros_matrix = nl.zeros((nl.par_dim(c_out_pmax), out_height, out_width), nl.float32, buffer=nl.psum)
+                nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], output_image)
+                # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], zeros_matrix)
 
     return X_out
 

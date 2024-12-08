@@ -50,10 +50,10 @@ def test_correctness_conv2d_kernel(
 ):
     ref_impl = conv2d_cpu_torch
 
-    # input_channels_list = [128, 256]
-    # output_channels_list = [128, 256]
-    input_channels_list = [128]
-    output_channels_list = [128]
+    input_channels_list = [128, 256]
+    output_channels_list = [128, 256]
+    # input_channels_list = [128]
+    # output_channels_list = [128]
     kernel_size_list = [3]
     batch_size_list = [4]
     image_dims_list = [(32, 16)]
@@ -190,16 +190,16 @@ if __name__ == "__main__":
     else:
         print("Failed 😢")
 
-    # print(
-    #     "Running correctness test for conv2d kernel with larger images...",
-    #     end="",
-    #     flush=True,
-    # )
-    # test_result = test_correctness_conv2d_kernel(conv2d, use_larger_images=True)
-    # if test_result:
-    #     print("Passed 😇")
-    # else:
-    #     print("Failed 😢")
+    print(
+        "Running correctness test for conv2d kernel with larger images...",
+        end="",
+        flush=True,
+    )
+    test_result = test_correctness_conv2d_kernel(conv2d, use_larger_images=True)
+    if test_result:
+        print("Passed 😇")
+    else:
+        print("Failed 😢")
 
     # print(
     #     "Running correctness test for conv2d kernel with larger images + bias...",
