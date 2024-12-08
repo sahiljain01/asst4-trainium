@@ -90,22 +90,6 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     for bias_tile_out in nl.affine_range(n_tiles_c_out):
         bias_sbuf[bias_tile_out, :, 0] = nl.load(bias[128 * bias_tile_out: 128 * (bias_tile_out + 1)])
 
-    # for n_tile_in in nl.affine_range(n_tiles_c_in):
-    #     for n_tile_out in nl.affine_range(n_tiles_c_out):
-    #         weight_no_transpose = nl.load(W[128 * n_tile_out: 128 * (n_tile_out + 1), 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
-    #         weight_matrix_orig[n_tile_out, :, n_tile_in, :, :, :] = weight_no_transpose
-
-    # # move data around using nl.copy to get an array of shape 
-    # for n_tile_in in nl.affine_range(n_tiles_c_in):
-    #     for n_tile_out in nl.affine_range(n_tiles_c_out):
-    #         for n_tile_in_channel in nl.affine_range(128):
-    #             for n_tile_out_channel in nl.affine_range(128):
-    #                 for k_h in nl.affine_range(filter_height):
-    #                     for k_w in nl.affine_range(filter_width):
-    #                         weight_matrix[k_h, k_w, n_tile_out, n_tile_in, :, n_tile_in_channel] = nl.copy(
-    #                             weight_matrix_orig[n_tile_out, :, n_tile_in, n_tile_in_channel, k_h, k_w]
-    #                         )
-
     W = W.reshape((n_tiles_c_out, c_out_pmax, n_tiles_c_in, c_in_pmax, filter_height, filter_width))
 
     weight_sbuf = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype = W.dtype, buffer = nl.sbuf)
