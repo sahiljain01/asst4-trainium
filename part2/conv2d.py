@@ -57,7 +57,13 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     # Can assume one PSUM bank can at least fit one row of the pixels
     assert nl.tile_size.gemm_moving_fmax >= out_width
 
-    # Initialize output array
+    # # Initialize output array
+    # X_out_no_pooling = nl.ndarray(
+    #     shape=(batch_size, out_channels, out_height, out_width),
+    #     dtype=X.dtype,
+    #     buffer=nl.sbuf,
+    # )
+
     X_out = nl.ndarray(
         shape=(batch_size, out_channels, out_pool_height, out_pool_width),
         dtype=X.dtype,
@@ -130,6 +136,12 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 buffer=nl.sbuf
             )
 
+            output_image_pooled = nl.ndarray(
+                (nl.par_dim(c_out_pmax), out_chunks // pool_size, out_width // pool_size), 
+                dtype=W.dtype,
+                buffer=nl.sbuf
+            )
+
             for n_tile_out_index in nl.sequential_range(n_tiles_c_out):
                 # assign space in SBUF to store output
                 # loop over output_rows:
@@ -153,6 +165,13 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                     output_image[:, row, :] = res_psum
 
                 output_image[:, :, :] = nisa.tensor_scalar(output_image, np.add, bias_sbuf[n_tile_out_index, :, 0])
-                nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), n_chunk * out_chunks: (n_chunk * out_chunks) + out_chunks, :], output_image)
+                i_0 = nl.arange(c_out_pmax)[:, None, None, None, None] #
+                i_1 = nl.arange(out_chunks // pool_size)[None, :, None, None, None] # y_outer
+                i_2 = nl.arange(pool_size)[None, None, :, None, None] # y_inner
+                i_3 = nl.arange(out_width // pool_size)[None, None, None, :, None] # x_outer
+                i_4 = nl.arange(pool_size)[None, None, None, None, :] # x_inner
+
+                output_image_pooled[:, :, :] = nl.max(output_image[i_0, pool_size*i_1+i_2, pool_size*i_3+i_4], axis=[2,4])
+                nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), n_chunk * (out_chunks // pool_size): (n_chunk * (out_chunks // pool_size)) + (out_chunks // pool_size), :], output_image_pooled[:, :, :])
 
     return X_out
