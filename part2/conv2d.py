@@ -81,33 +81,60 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     n_tiles_c_in = in_channels // c_in_pmax
     n_tiles_c_out = out_channels // c_in_pmax # TODO: these should both be 128?
 
-    # load in the weights into an SBUF array of shape (n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, 128, kernel_height, kernel_width)
-    weight_matrix = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype=nl.float32, buffer=nl.sbuf)
-    weight_matrix_pt2 = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_in_pmax), c_out_pmax), dtype=nl.float32, buffer=nl.sbuf)
+    # load in the weights into an SBUF array of shape 
+    # (n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, 128, kernel_height, kernel_width)
+    weight_matrix_orig = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype=nl.float32, buffer=nl.sbuf)
+    weight_matrix = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax), dtype=nl.float32, buffer=nl.sbuf)
 
     for n_tile_in in nl.affine_range(n_tiles_c_in):
         for n_tile_out in nl.affine_range(n_tiles_c_out):
             weight_no_transpose = nl.load(W[128 * n_tile_out: 128 * (n_tile_out + 1), 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
-            # weight_transpose = weight_no_transpose.reshape((filter_height, filter_width, 1, 1, c_in_pmax, c_out_pmax))
-            weight_matrix[n_tile_out, :, n_tile_in, :, :, :] = weight_no_transpose
-            # weight_matrix_pt2[:, :, n_tile_out, n_tile_in, :, :] = weight_transpose
+            weight_matrix_orig[n_tile_out, :, n_tile_in, :, :, :] = weight_no_transpose
+
+    x_sbuf = nl.ndarray((2, nl.par_dim(100), 100, 100), buffer=nl.sbuf, dtype=nl.float32) # specify P dimension to be the second dimension
+    # for i in nl.affine_range(0,200,100):
+    #     x_sbuf[i] = nl.load(x[i:i+100])
+    # This [3:8,13:18] indexing is only allowed inside SBUF
+    # y = nl.copy(x_sbuf[0,:,3:8,13:18])
+
+
+    # move data around using nl.copy to get an array of shape 
+    # (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_out_pmax), c_in_pmax)
+    for n_tile_in in nl.affine_range(n_tiles_c_in):
+        for n_tile_out in nl.affine_range(n_tiles_c_out):
+            for n_tile_in_channel in nl.affine_range(128):
+                for n_tile_out_channel in nl.affine_range(128):
+                    
+                    # (n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, 128, kernel_height, kernel_width)
+                    # i_a, i_b, i_c, i_d, i_e, i_f = nl.mgrid[n_tile_out, n_tile_out_channel, n_tile_in, n_tile_in_channel, 0:filter_height, 0:filter_width]
+                    i_a, i_b, i_c, i_d, i_e, i_f = nl.mgrid[0:1, 0:1, 0:1, 0:1, 0:filter_height, 0:filter_width]
+
+                    i_a = i_a + n_tile_out
+                    i_b = i_b + n_tile_out_channel
+                    i_c = i_c + n_tile_in
+                    i_d = i_d + n_tile_in_channel
+
+                    i_g, i_l = nl.mgrid[ 0:filter_height, 0:filter_width]
+
+                    # p = nl.copy(
+                    #     weight_matrix_orig[0, 0, :, :, :, :]
+                    # )
+                    # weight_matrix[:, :, n_tile_out, n_tile_in, n_tile_out_channel, n_tile_in_channel] = nl.copy(
+                    #     weight_matrix_orig[n_tile_out, n_tile_out_channel, n_tile_in, n_tile_in_channel, :, :]
+                    # )
+                    weight_matrix[i_g, i_l, n_tile_out, n_tile_in, n_tile_out_channel, n_tile_in_channel] = nl.copy(
+                        weight_matrix_orig[i_a, i_b, i_c, i_d, i_e, i_f]
+                    )
+                    # p = nl.copy(
+                    #     weight_matrix_orig[i_a, i_b, i_c, i_d, i_e, i_f]
+                    # )
+
 
     # transpose that to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax), call this w
-    weight_matrix_pt2 = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_in_pmax), c_out_pmax), dtype=nl.float32, buffer=nl.sbuf)
-    i_p0 = nl.arange(n_tiles_c_out)[:, None, None, None, None, None]
-    i_p1 = nl.arange(c_out_pmax)[ None, :, None, None, None, None]
-    i_p2 = nl.arange(n_tiles_c_in)[ None, None, :, None, None, None]
-    i_p3 = nl.arange(c_in_pmax)[ None, None, None, :, None, None]
-    i_p4 = nl.arange(filter_height)[ None, None, None, None, :, None]
-    i_p5 = nl.arange(filter_width)[ None, None, None, None, None, :]
 
-    weight_matrix_pt2[i_p4, i_p5, i_p0, i_p2, i_p3, i_p1] = nl.copy(weight_matrix[i_p0, i_p1, i_p2, i_p3, i_p4, i_p5])    
-
-    # nl.device_print("weight matrix orig", weight_matrix[1, 1, 1, 1, :, :])
-    weight_matrix_value = weight_matrix_pt2[0, 0, 0, 0, 0, 0]
-    # nl.device_print("weight matrix orig", W[1, 1, :, :])
 
     # loop over batch:
+    """
     for b in nl.affine_range(batch_size):
         image = nl.ndarray(
             (n_tiles_c_in, nl.par_dim(c_in_pmax), input_height, input_width), 
@@ -119,7 +146,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
             # load corresponding part of input image
             image[n_tile_in, :, :, :] = nl.load(X[b, 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
 
-        # loop over n_tiles_c_out:
+        # # loop over n_tiles_c_out:
         for n_tile_out_index in nl.affine_range(n_tiles_c_out):
             # assign space in SBUF to store output
             output_image = nl.ndarray(
@@ -138,17 +165,22 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                         # loop over n_tiles_c_in
                         for n_tile_in_index in nl.affine_range(n_tiles_c_in):
                             # (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax)
+                            
                             result = nl.matmul(
                                 weight_matrix_pt2[filter_height_index, filter_width_index, n_tile_out_index, n_tile_in_index, :, :],
                                 image[n_tile_in_index, :, row + filter_height_index, filter_width_index: filter_width_index + out_width]
                             )
+                            # # res_psum[:, :] = nl.copy(nl.add(result, res_psum))
                             res_psum += result
 
                 # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), row, :], res_psum)
                 output_image[:, row, :] = res_psum
 
+            
+            # zeros_matrix = nl.zeros((nl.par_dim(c_out_pmax), out_height, out_width), nl.float32, buffer=nl.psum)
             nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], output_image)
-
+            # nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), :, :], zeros_matrix)
+        """
 
     # - assign space in SBUF to store entire image, call it x
     # # shape : (n_tiles_c_in, nl.par_dim(c_in_pmax), image_height, image_width)
@@ -168,6 +200,9 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     #         - copy stuff from PSUM back to SBUF
     #     - copy stuff from SBUF back to HBM
 
+    # weight_matrix_pt2[i_p4, i_p5, i_p0, i_p2, i_p3, i_p1] = nl.copy(weight_matrix[i_p0, i_p1, i_p2, i_p3, i_p4, i_p5])    
+    # print(weight_matrix_pt2.shape)
+    # nl.device_print("Weight Matrix", weight_matrix_pt2[0,0,0,0,:, :])
 
 
 
@@ -190,3 +225,21 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
     return X_out
 
+if __name__ == "__main__":
+    input_channels = 128
+    output_channels = 128
+    kernel_size = 3
+    batch_size = 4
+    image_dims = (32, 16)
+
+    X = np.random.rand(
+        batch_size, input_channels, image_dims[0], image_dims[1]
+    ).astype(np.float32)
+    W = np.random.rand(
+        output_channels, input_channels, kernel_size, kernel_size
+    ).astype(np.float32)
+    bias = (
+        np.zeros(output_channels).astype(np.float32)
+    )
+
+    fused_conv2d_maxpool(X, W, bias)
