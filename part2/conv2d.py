@@ -90,23 +90,38 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     for bias_tile_out in nl.affine_range(n_tiles_c_out):
         bias_sbuf[bias_tile_out, :, 0] = nl.load(bias[128 * bias_tile_out: 128 * (bias_tile_out + 1)])
 
-    for n_tile_in in nl.affine_range(n_tiles_c_in):
-        for n_tile_out in nl.affine_range(n_tiles_c_out):
-            weight_no_transpose = nl.load(W[128 * n_tile_out: 128 * (n_tile_out + 1), 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
-            weight_matrix_orig[n_tile_out, :, n_tile_in, :, :, :] = weight_no_transpose
+    # for n_tile_in in nl.affine_range(n_tiles_c_in):
+    #     for n_tile_out in nl.affine_range(n_tiles_c_out):
+    #         weight_no_transpose = nl.load(W[128 * n_tile_out: 128 * (n_tile_out + 1), 128 * n_tile_in: 128 * (n_tile_in + 1), :, :])
+    #         weight_matrix_orig[n_tile_out, :, n_tile_in, :, :, :] = weight_no_transpose
 
-    x_sbuf = nl.ndarray((2, nl.par_dim(100), 100, 100), buffer=nl.sbuf, dtype=W.dtype) # specify P dimension to be the second dimension
+    # # move data around using nl.copy to get an array of shape 
+    # for n_tile_in in nl.affine_range(n_tiles_c_in):
+    #     for n_tile_out in nl.affine_range(n_tiles_c_out):
+    #         for n_tile_in_channel in nl.affine_range(128):
+    #             for n_tile_out_channel in nl.affine_range(128):
+    #                 for k_h in nl.affine_range(filter_height):
+    #                     for k_w in nl.affine_range(filter_width):
+    #                         weight_matrix[k_h, k_w, n_tile_out, n_tile_in, :, n_tile_in_channel] = nl.copy(
+    #                             weight_matrix_orig[n_tile_out, :, n_tile_in, n_tile_in_channel, k_h, k_w]
+    #                         )
 
-    # move data around using nl.copy to get an array of shape 
-    for n_tile_in in nl.affine_range(n_tiles_c_in):
-        for n_tile_out in nl.affine_range(n_tiles_c_out):
-            for n_tile_in_channel in nl.affine_range(128):
-                for n_tile_out_channel in nl.affine_range(128):
-                    for k_h in nl.affine_range(filter_height):
-                        for k_w in nl.affine_range(filter_width):
-                            weight_matrix[k_h, k_w, n_tile_out, n_tile_in, :, n_tile_in_channel] = nl.copy(
-                                weight_matrix_orig[n_tile_out, :, n_tile_in, n_tile_in_channel, k_h, k_w]
-                            )
+    W = W.reshape((n_tiles_c_out, c_out_pmax, n_tiles_c_in, c_in_pmax, filter_height, filter_width))
+
+    weight_sbuf = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype = W.dtype, buffer = nl.sbuf)
+    weight_copy = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax), dtype=W.dtype, buffer=nl.sbuf)
+    weight_matrix = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_in_pmax), c_out_pmax), dtype=W.dtype, buffer=nl.sbuf)
+
+    for c_out_tile in nl.affine_range(n_tiles_c_out):
+        weight_sbuf[c_out_tile] = nl.load(W[c_out_tile])
+
+    for c_out_tile in nl.affine_range(n_tiles_c_out):
+        for c_in_tile in nl.affine_range(n_tiles_c_in):
+            for i in nl.affine_range(filter_height):
+                for j in nl.affine_range(filter_width):
+                    weight_copy[i, j, c_out_tile, c_in_tile, :, :] = nl.copy(weight_sbuf[c_out_tile, :, c_in_tile, :, i, j], dtype = W.dtype)
+                    weight_matrix[i, j, c_out_tile, c_in_tile] = nisa.nc_transpose(weight_copy[i, j, c_out_tile, c_in_tile])
+
 
     out_chunks = 2
     n_chunks = (out_height + (out_chunks - 1)) // out_chunks
@@ -114,7 +129,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
     # loop over batch
     for b in nl.affine_range(batch_size):
-        for n_chunk in nl.affine_range(n_chunks):
+        for n_chunk in nl.sequential_range(n_chunks):
             image = nl.ndarray(
                 (n_tiles_c_in, nl.par_dim(c_in_pmax), in_rows, input_width), 
                 dtype=W.dtype, 
@@ -125,16 +140,16 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 # load corresponding part of input image
                 image[n_tile_in, :, :, :] = nl.load(X[b, 128 * n_tile_in: 128 * (n_tile_in + 1), (n_chunk * out_chunks): (n_chunk * out_chunks) + in_rows, :])
 
-            # # loop over n_tiles_c_out:
-            for n_tile_out_index in nl.affine_range(n_tiles_c_out):
+            output_image = nl.ndarray(
+                (nl.par_dim(c_out_pmax), out_chunks, out_width), 
+                dtype=W.dtype,
+                buffer=nl.sbuf
+            )
+
+            for n_tile_out_index in nl.sequential_range(n_tiles_c_out):
                 # assign space in SBUF to store output
-                output_image = nl.ndarray(
-                    (nl.par_dim(c_out_pmax), out_chunks, out_width), 
-                    dtype=W.dtype,
-                    buffer=nl.sbuf
-                )
                 # loop over output_rows:
-                for row in nl.affine_range(out_chunks):
+                for row in nl.sequential_range(out_chunks):
                     # assign space in PSUM to store output row
                     res_psum = nl.zeros((c_in_pmax, out_width), nl.float32, buffer=nl.psum)
                     # loop over kernel_height
@@ -146,13 +161,14 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                                 # (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax)
                                 result = nl.matmul(
                                     weight_matrix[filter_height_index, filter_width_index, n_tile_out_index, n_tile_in_index, :, :],
-                                    image[n_tile_in_index, :, row + filter_height_index, filter_width_index: filter_width_index + out_width]
+                                    image[n_tile_in_index, :, row + filter_height_index, filter_width_index: filter_width_index + out_width],
+                                    transpose_x=True
                                 )
                                 res_psum += result
 
                     output_image[:, row, :] = res_psum
 
-                output_image = nisa.tensor_scalar(output_image, np.add, bias_sbuf[n_tile_out_index, :, 0])
+                output_image[:, :, :] = nisa.tensor_scalar(output_image, np.add, bias_sbuf[n_tile_out_index, :, 0])
                 nl.store(X_out[b, 128 * n_tile_out_index: 128 * (n_tile_out_index + 1), n_chunk * out_chunks: (n_chunk * out_chunks) + out_chunks, :], output_image)
 
     return X_out
